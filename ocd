@@ -1,0 +1,166 @@
+#!/bin/bash
+set -e
+
+PROJECT_NAME='web'
+DC_DEFAULT_ARGS="-f ./docker-compose.yml --project-directory ."
+
+# NOTE: This location is also specified in the one-click/checksum.sh script and the compose yml.
+
+usage() {
+  cat << EOF
+
+usage:
+
+start   | `basename ${0}` start
+stop    | `basename ${0}` stop
+restart | `basename ${0}` restart
+build   | `basename ${0}` build
+migrate | `basename ${0}` migrate
+guard   | `basename ${0}` guard
+test    | `basename ${0}` test
+int-test| `basename ${0}` int-test
+ps      | `basename ${0}` ps
+ports   | `basename ${0}` ports
+
+
+options:
+  --build : force building the images. Supported commands are: [start, restart, build, migrate, guard]
+
+commands:
+  start       Start the main service and the dependencies
+  stop        Stop and tear down the main service and the dependencies
+  restart     Restart the main service and the dependencies
+  build       Build the main image
+  migrate     Runs database migrations
+  guard       Starts the guard service, which watches over the file system for changes and run specs accordingly
+  test        Executes unit tests
+  int-test    Executes integration tests
+  ps          prints out running services
+  ports       alias of ps
+
+EOF
+
+  exit ${2:-0}
+}
+
+start() {
+    # Bring up environment
+    echo "Bringing up dependent docker containers..."
+    smart_rebuild
+    dep
+    echo "Running database migrations"
+    docker-compose up --detach db_migration
+    echo "Bringing up $PROJECT_NAME"
+    docker-compose up --detach $PROJECT_NAME
+    wait_for_http_request kafkateria http://localhost:8002/ping OK
+    echo -e "\033[0;32m[SUCCESS]\033[0m"
+    echo ""
+    echo "Your local environment is ready! Open app at: http://localhost:3000"
+    echo ""
+    echo "To attach to the interactable service (e.g. using byebug), run:"
+    echo "docker container attach $(docker-compose $DC_DEFAULT_ARGS ps -q $PROJECT_NAME)"
+}
+
+dep() {
+    echo "Logging into ECR..."
+    $(aws ecr get-login --no-include-email --region us-east-1)
+    echo "Bringing up all Docker containers except for $PROJECT_NAME..."
+    docker-compose up --detach --scale $PROJECT_NAME=0 --scale db_migration=0
+    wait_for_log kafka ${SCHEMA_REGISTRY_IMG:-schema-registry} "Server started, listening for requests..."
+    echo -e "\033[0;32m[SUCCESS]\033[0m"
+}
+
+smart_rebuild() {
+    make -s -f ./one_click_dev/Makefile ./one_click_dev/smartrebuild.o
+}
+
+build() {
+  echo "Building image ..."
+  docker-compose $DC_DEFAULT_ARGS build $PROJECT_NAME
+}
+
+migrate() {
+  echo "Running database migrations ..."
+  docker-compose $DC_DEFAULT_ARGS run --rm db_migrate
+}
+
+guard() {
+  echo "Starting Guard ..."
+  smart_rebuild
+  docker-compose $DC_DEFAULT_ARGS -f docker-compose-guard.yml run --rm guard
+}
+
+test() {
+  echo "Running Unit Tests ..."
+
+  main_container_id=$(docker-compose $DC_DEFAULT_ARGS ps -q $PROJECT_NAME)
+
+  if [[ ! -z "$main_container_id" ]]; then
+    echo "Piggybacking on main container ..."
+    docker-compose $DC_DEFAULT_ARGS exec $PROJECT_NAME rspec --exclude-pattern "spec/integraion-tests/**/*_spec.rb"
+  else
+    docker-compose $DC_DEFAULT_ARGS up -d $PROJECT_NAME
+    docker-compose $DC_DEFAULT_ARGS exec $PROJECT_NAME rspec --exclude-pattern "spec/integraion-tests/**/*_spec.rb"
+  fi
+}
+
+int-test() {
+  echo "Running integraion Tests ..."
+
+  main_container_id=$(docker-compose $DC_DEFAULT_ARGS ps -q $PROJECT_NAME)
+
+  if [[ ! -z "$main_container_id" ]]; then
+    echo "Piggybacking on main container ..."
+    docker-compose $DC_DEFAULT_ARGS exec $PROJECT_NAME rspec spec/integration-tests
+  else
+    start
+    docker-compose $DC_DEFAULT_ARGS exec $PROJECT_NAME rspec spec/integration-tests
+  fi
+}
+
+stop() {
+    echo "Stopping and removing Docker containers..."
+    docker-compose $DC_DEFAULT_ARGS down -v
+    echo -e "\033[0;32m[SUCCESS]\033[0m"
+}
+
+ports() {
+  docker-compose $DC_DEFAULT_ARGS ps
+}
+
+wait_for_log () {
+  local name="$1"; shift
+  local img="$1"; shift
+  local pattern="$1"; shift
+  local timeout="${1:-30s}"
+  echo "Waiting for $name to initialize..."
+  timeout --foreground $timeout docker-compose logs -f $img | grep -q "$pattern" && return 0
+  echo -e "[0;31m[FAILURE][0m"
+  exit 1
+}
+
+wait_for_http_request () {
+  local name="$1"; shift
+  local url="$1"; shift
+  local pattern="$1"
+  echo "Waiting for $name to initialize..."
+  for i in 1 2 3 4 5 6; do curl -s GET $url | grep -q $pattern && return 0 || sleep 5; done
+  echo -e "[0;31m[FAILURE][0m"
+  exit 1
+}
+
+BUILD=true
+case "$1" in
+    start)   start;;
+    dep)     dep;;
+    stop)    stop;;
+    test)    test;;
+    int-test) int-test;;
+    restart) stop; start;;
+    guard)   guard;;
+    build)   build;;
+    migrate) migrate;;
+    ports)   ports;;
+    ps)      ports;;
+    *)       usage;;
+esac

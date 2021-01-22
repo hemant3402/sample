@@ -1,0 +1,4 @@
+{
+  "command": ["bundle", "exec", "rails", "db:migrate"],
+  "failureAction": "ROLLBACK"
+}

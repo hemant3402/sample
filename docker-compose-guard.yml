@@ -1,0 +1,22 @@
+version: '3.6'
+services:
+  guard:
+    image: my_app.latest
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    volumes:
+      # NOTE: We have to avoid mounting the vendor folder here because
+      #       file system mount is extremely slow when working with bundler
+      - .:/var/app
+    environment:
+      - DB_HOST=db
+      - DISABLE_SPRING=true
+      - RAILS_ENV=test
+    stdin_open: true
+    tty: true
+    command: bundle exec guard
+    depends_on:
+      - db
+      - db_migration
+    restart: on-failure

@@ -1,0 +1,221 @@
+defaults: &defaults
+    parallelism: 1
+    working_directory: ~/workspace
+    docker:
+      - image: 421990735784.dkr.ecr.us-east-1.amazonaws.com/ci-build-environment:ruby-2.7-buster-node
+        aws_auth:
+          aws_access_key_id: $AWS_ACCESS_KEY_ID
+          aws_secret_access_key: $AWS_SECRET_ACCESS_KEY
+        environment:
+          RAILS_ENV: test
+          DB_HOST_IP: 127.0.0.1
+      - image: circleci/mysql:5.7-ram
+        environment:
+          MYSQL_ALLOW_EMPTY_PASSWORD: true
+version: 2
+jobs:
+  build:
+    <<: *defaults
+    steps:
+      - checkout
+
+      # Grant CircleCI access to required folders
+      - run: sudo chmod 1777 -R /home/circleci/.bundle /tmp
+
+      # Restore bundle cache & npm cache
+      - restore_cache:
+          key: 'rails-{{ checksum "Gemfile.lock" }}'
+
+      - run:
+           name: Point bundle to vendor/bundle
+           command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run:
+          name: Install bundle
+          command: bundle install --jobs=4 --retry=3
+
+      # Store bundle cache
+      - save_cache:
+          key: 'rails-{{ checksum "Gemfile.lock" }}'
+          paths:
+            - ~/workspace/vendor/bundle
+
+      - persist_to_workspace:
+          # Must be an absolute path, or relative path from working_directory
+          root: ~/workspace
+          # Must be relative path from root
+          paths:
+            - .
+
+  lint:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/workspace
+      - run:
+           name: Point bundle to vendor/bundle
+           command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: bundle exec rubocop
+
+  validate-topics:
+    <<: *defaults
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - attach_workspace:
+          at: ~/workspace
+      - run:
+           name: Point bundle to vendor/bundle
+           command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: bundle exec rails g flipp_ruby_kafka:topic_validation $CIRCLE_PROJECT_REPONAME
+      - run: ./deploy/staging.sh --only-topic-validation
+  
+  validate-schemas:
+    <<: *defaults
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - attach_workspace:
+          at: ~/workspace
+      - run:
+           name: Point bundle to vendor/bundle
+           command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: bundle exec rails g flipp_ruby_kafka:schema_validation
+      - run: ./deploy/staging.sh --only-schema-validation
+
+  validate-schemas-prod:
+    <<: *defaults
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - attach_workspace:
+          at: ~/workspace
+      - run:
+           name: Point bundle to vendor/bundle
+           command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: bundle exec rails g flipp_ruby_kafka:schema_validation
+      - run: ./deploy/production.sh --only-schema-validation
+
+  test-rspec:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/workspace
+      - run:
+           name: Point bundle to vendor/bundle
+           command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run:
+          name: Wait for DB
+          command: dockerize -wait tcp://localhost:3306 -timeout 1m
+      - run:
+          name: Creating DB
+          command: bundle exec rails db:create db:migrate
+      - run: mkdir result
+      - run:
+          name: Running rspec
+          command: bundle exec rspec --format progress --format RspecJunitFormatter -o result/rspec.xml
+          when: always
+      - store_test_results:
+          path: ~/workspace/result
+
+  one-for-all:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/workspace
+      - run:
+          name: execute one-for-all
+          command: |
+              aws s3 cp s3://one-for-all/start-one-for-all.sh start-one-for-all.sh
+              chmod +x ./start-one-for-all.sh
+              ENFORCER_LANGUAGE="ruby" ./start-one-for-all.sh
+
+  build-datadog:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/workspace
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Point bundle to vendor/bundle
+          command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: ruby ./datadog/build_datadog.rb
+      - run: ./deploy/staging.sh --only-datadog
+
+  deploy-to-staging:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/workspace
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Point bundle to vendor/bundle
+          command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: ./deploy/staging.sh --only-deploy
+
+  deploy-to-prod:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/workspace
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Point bundle to vendor/bundle
+          command: sudo chmod 1777 -R /home/circleci/.bundle && bundle config set path 'vendor/bundle'
+      - run: ./deploy/production.sh --only-deploy
+
+workflows:
+  version: 2
+  build-test-and-deploy:
+    jobs:
+      - validate-schemas:
+            requires:
+            - build
+            filters:
+              branches:
+               ignore: master
+      - validate-schemas-prod:
+            requires:
+             - build
+            filters:
+              branches:
+               only: master
+      - validate-topics:
+            requires:
+              - build
+      - build
+      - build-datadog:
+            requires:
+              - build
+      - lint:
+            requires:
+             - build
+      - test-rspec:
+            requires:
+             - build
+      - one-for-all:
+            requires:
+              - test-rspec
+              - lint
+      - deploy-to-staging:
+            filters:
+              branches:
+                only: develop
+            requires:
+              - validate-schemas
+              - validate-topics
+              - test-rspec
+              - build-datadog
+              - lint
+      - deploy-to-prod:
+            filters:
+              branches:
+                only: master
+            requires:
+              - validate-schemas-prod
+              - validate-topics
+              - test-rspec
+              - build-datadog
+              - lint

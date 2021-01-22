@@ -1,0 +1,18 @@
+{
+  "namespace": "com.flipp.my_app",
+  "name": "MySchema",
+  "type": "record",
+  "doc": "Test schema",
+  "fields": [
+    {
+      "name": "id",
+      "type": "int",
+      "doc": "ID of the test"
+    },
+    {
+      "name": "some_val",
+      "type": "string",
+      "doc": "test string"
+    }
+  ]
+}

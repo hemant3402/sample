@@ -1,0 +1,41 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>My App - <%= yield(:title) if content_for?(:title) %></title>
+    <%= stylesheet_link_tag 'application' %>
+    <%= favicon_link_tag %>
+    <%= csrf_meta_tags %>
+    <link rel="stylesheet" href="https://f.wishabi.net/assets/flipp/stylesheets/main_layout.css">
+  </head>
+
+  <body id="main_interface">
+    <div id="utility-bar">
+      <div class="app-display">
+        <div>
+          <img id="flipp-logo" src="https://f.wishabi.net/assets/flipp/images/logo_white.png" alt="Logo white">
+          <div id="app-display-divider"></div>
+          <div id="app-name">
+            <a href="#">My App</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="menu-layout">
+      <div id="main-content">
+        <% if content_for?(:title) %>
+          <h1><%= yield(:title) %>
+          <% if content_for?(:description) %>
+            <small><%= yield(:description) %></small>
+          <% end %>
+          </h1>
+        <% end %>
+        <% flash.each do |key, value| %>
+          <%= content_tag :div, value, class: "flash #{key}" %>
+        <% end %>
+        <%= yield %>
+      </div>
+    </div>
+  </body>
+</html>
